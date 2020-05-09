@@ -1,0 +1,381 @@
+---
+title: "Discipline Assignment II"
+author: "Alexander HUANG"
+date: "27/04/2020"
+output: html_document
+---
+
+```{r libraries, include=FALSE}
+library(tidyverse)
+library(class)
+library(cvTools)
+library(ggplot2)
+library(e1071)
+library(pheatmap)
+library(caret)
+library(survival)
+library(survminer)
+library(Hmisc)
+library(randomForestSRC)
+library(glmnet)
+
+library(GEOquery)  
+library(R.utils)
+library(reshape2)
+library(limma)
+library(dplyr)
+library(affy)
+library(DescTools)
+
+#BiocManager::install("affy")
+```
+
+
+```{r, preprocessing GSE15296 MicroArray Data}
+## grabbing outcomes in GSE15296 dataset
+
+clinical_outcome96 <-getGEO("GSE15296")
+clinical_outcome96 <- clinical_outcome96$GSE15296_series_matrix.txt.gz
+rejection_status96  <- clinical_outcome96$characteristics_ch1.1
+rejection_status96 <- unlist(lapply( strsplit(as.character(rejection_status96), ": " ) , `[[` , 2)  )
+rejection_status96 = ifelse(rejection_status96 == "Acute Kidney Rejection", "Yes", "No")
+#noting that yes == acute kidney rejection
+
+table(rejection_status96)
+
+## unzipping and extracting local data (make sure that GSE15296_RAW.tar is installed in the same folder as this rmd file)
+
+datadir = "GSE15296_RAW"
+fileNames <- list.files(datadir)
+head(fileNames)
+
+#Unzip
+#for (files in fileNames){
+#  gunzip(file.path(datadir,files))
+#}
+
+# Read in all 75 CEL files using ReadAffy to make table
+
+gse = c()
+for(i in 1:length(fileNames)){
+  eset <- just.rma(filenames = file.path(datadir, fileNames[i]))
+  temp = exprs(eset)
+  gse <- cbind(gse, temp)
+  colnames(gse)[i] <- colnames(temp)
+}
+
+rownames(gse) = rownames(ReadAffy(filenames = file.path(datadir, fileNames[1])))
+gse96 = gse
+dim(gse96)
+#this means that of the 75 patients,  gene expression were measured across 54675 genes
+
+#checking if our data has been log2 transformed (standard normalisation technique for RNA seq data)
+#summary(gse96[,1])
+
+#initial boxplot to check
+#ggplot(melt(gse96), aes(x=Var1, y=value)) +  
+#  geom_boxplot(outlier.colour="black", outlier.shape=16,
+#             outlier.size=0.5, notch=FALSE) +
+#  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+#  labs (x = "patient", y = "expression value") + theme_minimal()
+
+write.csv(gse96, "GSE15296_expression_matrix.txt")
+```
+
+```{r, preprocessing GSE14346 MicroArray Data}
+## grabbing outcomes in GSE14346 dataset
+clinical_outcome46 <-getGEO("GSE14346")
+clinical_outcome46 <- clinical_outcome46$GSE14346_series_matrix.txt.gz
+rejection_status46  <- clinical_outcome46$characteristics_ch1.1
+rejection_status46 <- unlist(lapply( strsplit(as.character(rejection_status46), ": " ) , `[[` , 2)  )
+rejection_status46 = ifelse(rejection_status46 %like% "AR%", "Yes", "No")
+#noting that Yes == acute kidney rejection
+table(rejection_status46)
+
+## unzipping and extracting local data (make sure similarly GSE14346_RAW is installed in the same folder as this rmd file)
+
+datadir = "GSE14346_RAW"
+fileNames <- list.files(datadir)
+head(fileNames)
+
+#Unzip
+#for (files in fileNames){
+#  gunzip(file.path(datadir,files))
+#}
+
+# Read in all 75 CEL files using ReadAffy to make table
+
+#ensure if you unzipped to rerun this code below again....
+#fileNames <- list.files(datadir)
+
+gse_2 = c()
+for(i in 1:length(fileNames)){
+  eset <- just.rma(filenames = file.path(datadir, fileNames[i]))
+  temp = exprs(eset)
+  gse_2 <- cbind(gse_2, temp)
+  colnames(gse_2)[i] <- colnames(temp)
+}
+
+rownames(gse_2) = rownames(ReadAffy(filenames = file.path(datadir, fileNames[1])))
+gse46 = gse_2
+dim(gse46)
+#this means that of the 75 patients, gene expression were measured across 54675 genes
+
+#similarly, checking if our data has been log2 transformed (standard normalisation technique for RNA seq data)
+#summary(gse46[,1])
+
+write.csv(gse46, "GSE14346_expression_matrix.txt")
+```
+
+```{r,Reading datasets and Preprocessing}
+## FOR GSE15296 #############################################
+gse96 = read.csv("GSE15296_expression_matrix.txt")
+rownames(gse96) = unlist(as.list(gse96[1]))
+gse96 = gse96[-1]
+
+##Initial filtering of genes based on variance... if less than 90% quantile, then we will not consider it for our model as it indicates it does not vary significantly between people and thus will not be a good indicator. 
+
+largevar = apply(gse96, 1, var)
+summary(largevar)
+ind = which(largevar > quantile(largevar, 0.9))
+
+dfgse96 = data.frame(t(gse96[ind,]))
+dfgse96 = cbind(reject_stat = rejection_status96,dfgse96)
+dfgse96$reject_stat <- ifelse(rejection_status96=="Yes",1,0)  #1 = YES, 0 = NO
+write.csv(dfgse96, "GSE15296_topredict.txt")
+
+## FOR GSE14346 #############################################
+gse46 = read.csv("GSE14346_expression_matrix.txt")
+rownames(gse46) = unlist(as.list(gse46[1]))
+gse46 = gse46[-1]
+
+dfgse46 = data.frame(t(gse46[ind,]))
+dfgse46 = cbind(reject_stat = rejection_status46, dfgse46)
+dfgse46$reject_stat <- ifelse(rejection_status46=="Yes",1,0)  #1 = YES, 0 = NO
+#checking if genes in 2 datasets are the same 
+#which(colnames(dfgse96) != colnames(dfgse46)) (outputs zero!)
+write.csv(dfgse46, "GSE14346_topredict.txt")
+
+```
+
+```{R, ACTUAL CV Testing (SVM, Log-Regression & LASSO) on GSE15296}
+####### Functions
+library(glmnet)
+plot(reg)
+
+F1 <- function(x) {
+    TN <- x[2,2]
+    FP <- x[1,2]
+    TP <- x[1,1]
+    FN <- x[2,1]
+    2*TP/(2*TP+FP+FN)
+}
+
+dfgse96_all = read.csv("GSE15296_topredict.txt")
+rownames(dfgse96_all) = unlist(as.list(dfgse96_all[1]))
+dfgse96_all = dfgse96_all[-1]
+dfgse96 = dfgse96_all[-1]
+
+set.seed(1)
+testd= sample_n(dfgse96_all, 20)
+
+write.csv(testd[-1], "test_dat.csv", row.names = TRUE)
+write.csv(testd$reject_stat, "test_pred.csv")
+
+y <- dfgse96_all$reject_stat
+
+library(caret)
+library(dplyr)
+k <- 3
+set.seed(1)
+fold <- createFolds(y, k)
+
+###SVM 
+F1all_svm = ACCall_svm= c()
+for(i in 1:length(fold)){
+    model1 <- svm(dfgse96[-fold[[i]],], y[-fold[[i]]], probability=TRUE, scale = TRUE)
+    preds1 <- ifelse(predict(model1, dfgse96[fold[[i]],]) > 0.5, 1, 0) 
+    tab = table(preds1,y[fold[[i]]])
+    acc_svm = tab %>% diag %>% sum %>% `/`(nrow(dfgse96[fold[[i]],]))
+    F1all_svm = c(F1all_svm, F1(tab))
+    ACCall_svm = c(ACCall_svm, acc_svm)}
+mean(F1all_svm)
+mean(ACCall_svm)
+
+##RandomForest
+set.seed(1)
+F1all_rf = ACCall_rf = c()
+for(i in 1:length(fold)){
+    rf_res <- randomForest::randomForest(x = dfgse96[-fold[[i]],], y = as.factor(y[-fold[[i]]]))
+    preds4 <- predict(rf_res, dfgse96[fold[[i]],])
+    tab = table(preds4,y[fold[[i]]])
+    acc_rf = tab %>% diag %>% sum %>% `/`(nrow(dfgse96[fold[[i]],]))
+    F1all_rf = c(F1all_rf, F1(tab))
+    ACCall_rf = c(ACCall_rf, acc_rf)}
+mean(F1all_rf)
+mean(ACCall_rf)
+
+
+##Logistic REGRESSION -has issues of multicolinearlity 
+F1all_glm = ACCall_glm =c()
+for(i in 1:length(fold)){
+    model2 <- glm(y[-fold[[i]]]~., data = dfgse96[-fold[[i]],], family = binomial)
+    preds2 <- ifelse(predict(model2, dfgse96[fold[[i]],]) > 0.5, 1, 0) 
+    tab = table(preds2,y[fold[[i]]])
+    acc_glm = tab %>% diag %>% sum %>% `/`(nrow(dfgse96[fold[[i]],]))
+    F1all_glm = c(F1all_glm, F1(tab))
+    ACCall_glm = c(ACCall_glm, acc_glm)}
+mean(F1all_glm)
+mean(ACCall_glm)
+
+
+##LASSO REGRESSION 
+library(glmnet)
+#use built in CV of Lasso regression to find lambda (coeffecient shrinkage), being the value that minimises cross-validation error. 
+x1 <- model.matrix(reject_stat~., dfgse96_all)[,-1]
+y1 <- dfgse96_all$reject_stat
+reg = cv.glmnet(x1, y1, alpha = 1, family = "binomial")
+plot(reg)
+
+F1all_lasso = ACCall_lasso =c()
+for(i in 1:length(fold)){
+    x = model.matrix(y[-fold[[i]]]~., dfgse96[-fold[[i]],])[,-1]
+    model3 = glmnet(x, y[-fold[[i]]], family = "binomial", alpha = 0.5, lambda = reg$lambda.min)
+    x.test <- model.matrix(y[fold[[i]]]~., dfgse96[fold[[i]],])[,-1]
+    preds3 <- ifelse(predict(model3, x.test) > 0.5, 1, 0) 
+    tab = table(preds3,y[fold[[i]]])
+    acc_lasso = tab %>% diag %>% sum %>% `/`(nrow(dfgse96[fold[[i]],]))
+    F1all_lasso = c(F1all_lasso, F1(tab))
+    ACCall_lasso = c(ACCall_lasso, acc_lasso)}
+mean(F1all_lasso)
+mean(ACCall_lasso)
+
+#Visualisation of results
+
+#boxplot(F1all_svm, F1all_glm, F1all_lasso)
+#boxplot(ACCall_svm, ACCall_glm, ACCall_lasso)
+
+dat = data.frame(F1all_svm, F1all_rf, F1all_glm, F1all_lasso, ACCall_svm, ACCall_rf, ACCall_glm, ACCall_lasso)
+dat$group <-paste("Fold no:", rownames(dat))
+dat.m <- reshape2::melt(dat, id.vars = "group")
+
+dat.m$metric[which(dat.m$variable %like% "F1%")] = "F1"
+dat.m$metric[which(dat.m$variable %like% "ACC%")] = "Accuracy"
+
+ggplot(dat.m, aes(variable, value, fill = metric)) + 
+  geom_boxplot(outlier.colour="black", outlier.shape=16,
+             outlier.size=2, notch=FALSE) + scale_fill_brewer(palette="RdBu") +
+  ggtitle("Plot Accuracy and F1 of SVM, Logisitic and LASSO regression over 3-fold CVs") +
+  xlab("Evaluative Metric") + ylab("Score") +ylim(c(0.3, 1))
+
+```
+
+
+```{r, running LASSO on new GSE14346 data}
+dfgse46_all = read.csv("GSE14346_topredict.txt")
+rownames(dfgse46_all) = list.files("GSE14346_RAW")
+dfgse46_all = dfgse46_all[-1]
+dfgse46 = dfgse46_all[-1]
+
+y_train = dfgse96_all$reject_stat
+y_test <- dfgse46_all$reject_stat
+x_train <- model.matrix(y_train~., dfgse96)[,-1]
+x_test = model.matrix(y_test~., dfgse46)[,-1]
+
+##LASSO REGRESSION 
+#use built in CV of Lasso regression to find lambda (coeffecient shrinkage), being the value that minimises cross-validation error. 
+
+reg = cv.glmnet(x_train, y_train, alpha = 1, family = "binomial")
+plot(reg)
+
+F1all_lasso = ACCall_lasso =c()
+
+lassomodel = glmnet(x_train, y_train, family = "binomial", alpha = 0.5, lambda = reg$lambda.min)
+lassopreds <- ifelse(predict(lassomodel, x_test) > 0.5, 1, 0) 
+tab1 = table(lassopreds,y_test)
+acc_lasso = tab1 %>% diag %>% sum %>% `/`(nrow(dfgse46))
+
+set.seed(1)
+rf_res <- randomForest::randomForest(x = dfgse96, y = as.factor(y_test))
+fit4 <- predict(rf_res, dfgse46)
+tab2 = table(fit4,y_test)
+acc_rforest = tab2 %>% diag %>% sum %>% `/`(nrow(dfgse46))
+
+table(lassopreds,y_test)
+table(fit4,y_test)
+acc_lasso
+acc_rforest
+
+#We can see poor accuracy being reflected, thus illustrates there is a deviance in the different samples... consider possible calibration stage in SHINY. 
+#Also, the effects of this can be attributed to the low number of samples, which is addressed below as we use both datasets to build our model. 
+
+```
+
+
+```{r, building LASSO and RandomForest models with both datasets}
+xdat_all = rbind(dfgse46_all,dfgse96_all)
+dim(xdat_all)
+#write.csv(xdat_all, "Full_data(allgenes).csv")
+
+
+y <- xdat_all$reject_stat
+k <- 3
+set.seed(1)
+fold <- createFolds(y, k)
+
+##LASSO REGRESSION 
+#use built in CV of Lasso regression to find lambda (coeffecient shrinkage), being the value that minimises cross-validation error. 
+xdat = data.frame(xdat_all[-1])
+xdat_matrix <- model.matrix(y~., xdat)[,-1]
+set.seed(200)
+reg = cv.glmnet(xdat_matrix, y, alpha = 1, family = "binomial")
+plot(reg)
+
+saveRDS(xdat_matrix, "xdat.rds")
+saveRDS(y, "y.rds")
+
+F1all_lasso = ACCall_lasso =c()
+for(i in 1:length(fold)){
+    model3 = glmnet(xdat[-fold[[i]],], y[-fold[[i]]], family = "binomial", alpha = 1, lambda = reg$lambda.min)
+    preds3 <- ifelse(predict(model3, xdat[fold[[i]],], type ="response") > 0.5, 1, 0) 
+    tab = table(preds3,y[fold[[i]]])
+    acc_lasso = tab %>% diag %>% sum %>% `/`(nrow(dfgse96[fold[[i]],]))
+    F1all_lasso = c(F1all_lasso, F1(tab))
+    ACCall_lasso = c(ACCall_lasso, acc_lasso)}
+
+##RandomForest
+set.seed(1)
+F1all_rf = ACCall_rf = c()
+for(i in 1:length(fold)){
+    rf_res <- randomForest::randomForest(xdat[-fold[[i]],], as.factor(y[-fold[[i]]]))
+    preds4 <- predict(rf_res, xdat[fold[[i]],])
+    tab = table(preds4,y[fold[[i]]])
+    acc_rf = tab %>% diag %>% sum %>% `/`(nrow(dfgse96[fold[[i]],]))
+    F1all_rf = c(F1all_rf, F1(tab))
+    ACCall_rf = c(ACCall_rf, acc_rf)}
+
+results = data.frame(c(mean(F1all_lasso), mean(F1all_rf)), c(mean(ACCall_lasso), mean(ACCall_rf)))
+rownames(results) = c("Lasso", "RandomForest")
+colnames(results) = c("Mean F1 score", "Mean Accuracy")
+results
+
+```
+
+```{r}
+#finding selected genes and their respective parameter values
+modfin = glmnet(xdat, y, family = "binomial", alpha = 1, lambda = reg$lambda.min)
+selected_genes = rownames(as.matrix(coef(modfin)))[as.matrix(coef(modfin))[,1] != "0"]
+para = data.frame(as.matrix(coef(modfin))[which(rownames(as.matrix(coef(modfin))) %in% selected_genes)])
+rownames(para) = selected_genes
+colnames(para) = "parameter values"
+
+#58 genes incorporated overall
+
+#saving results
+write.csv(para, "finalpara.csv")
+saveRDS(modfin, "./final_model.rds")
+
+read.csv("finalpara.csv")
+
+```
+

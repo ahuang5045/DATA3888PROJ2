@@ -1,0 +1,242 @@
+---
+title: "Leftover Code (D.Ass II)"
+author: "Alexander HUANG"
+date: "02/05/2020"
+output: html_document
+---
+
+```{r}
+library(ggthemes)
+library(RColorBrewer)
+
+para = para %>% arrange(desc(abs(parameter.values)))
+para_sel = para[1:26,]
+para_sel$effect = ifelse(para_sel$parameter.values > 0, "-", "+")
+
+para_sel %>% ggplot(aes(x = reorder(X,parameter.values),
+                 y = exp(parameter.values)-1 , fill = effect)) + geom_col()+ scale_fill_brewer(palette="Pastel1") + labs(x = "Gene Expresssed", title = "Standardised Scores of Predictions of Differing wav files", color = "Country/Region") + theme(text = element_text(face = "bold", size = 10), legend.position = "none") + coord_flip() + scale_y_continuous(name= "Parameter value(transformed)", breaks = c(-7:12*0.10), limits=c(-0.7, 1.2)) 
+
+#note the logit transformation in logisitic regression means that the coeffecients reported for the final model cannot be directly reported as a percentage increase in overall ARF risk. Instead, it is better to state for example... that keeping all other variables constant, a 1 fold increase in X239040_at expression will contribute to a 75% chance increase in ARF liklihood. 
+
+#the top 25 most influential genes are visualised below....
+
+```
+
+
+```{r, LASSO regression with different no. features specified}
+library(cvTools)
+library(glmnet)
+library(caret)
+
+xdat_all = read.csv("Full_data(allgenes).csv")
+rownames(xdat_all) = unlist(as.list(xdat_all[1]))
+xdat_all = xdat_all[-1]
+
+xdat2 = xdat_all[-1]
+y <- xdat_all$reject_stat
+
+##LASSO REGRESSION 
+#use built in CV of Lasso regression to find lambda (coeffecient shrinkage), being the value that minimises cross-validation error. 
+
+xdat <- model.matrix(y~., xdat2)[,-1]
+set.seed(200)
+reg = cv.glmnet(xdat, y, alpha = 1, family = "binomial")
+plot(reg)
+
+saveRDS(reg, "reg_forlambda.rds")
+
+parano = unique(reg$nzero)
+ideal = 59
+se_1 = 14
+chosen_val = 5
+
+#reg$lambda[reg$nzero == 18] 
+
+accLASSOA_50times = accLASSOB_50times = accRF_50times = F1RF_50times =accGLM_50times = F1GLM_50times = F1LASSOA_50times = F1LASSOB_50times = accA = F1A = accB = F1B= accRF = F1RF = accGLM = F1GLM =c()
+
+k <- 3
+
+for (j in 1:30) {
+    print(j)
+    fold <- createFolds(y, k)
+##LASSO NO.1#############
+for(i in 1:length(fold)){
+    model3 = glmnet(xdat[-fold[[i]],], y[-fold[[i]]], family = "binomial", alpha = 1, lambda = reg$lambda.min)
+    preds3 <- ifelse(predict(model3, xdat[fold[[i]],], type ="response") > 0.5, 1, 0) 
+    tab = table(preds3,y[fold[[i]]])
+    accA[i] = tab %>% diag %>% sum %>% `/`(nrow(xdat[fold[[i]],]))
+    F1A[i] = F1(tab)}
+    
+    accLASSOA_50times <- append(accLASSOA_50times, mean(accA))
+    F1LASSOA_50times <- append(F1LASSOA_50times, mean(F1A))
+
+##LASSO NO.2#############
+for(i in 1:length(fold)){
+    model3a = glmnet(xdat[-fold[[i]],], y[-fold[[i]]], family = "binomial", alpha = 1, lambda =reg$lambda.1se)
+    #reg$lambda[reg$nzero == chosen_val][1]
+    preds3a <- ifelse(predict(model3a, xdat[fold[[i]],], type ="response") > 0.5, 1, 0) 
+    tab_a = table(preds3a,y[fold[[i]]])
+    accB[i] = tab_a %>% diag %>% sum %>% `/`(nrow(xdat[fold[[i]],]))
+    F1B[i] = F1(tab_a)}
+    
+    accLASSOB_50times <- append(accLASSOB_50times, mean(accB))
+    F1LASSOB_50times <- append(F1LASSOB_50times, mean(F1B))
+    
+##RandomForest#############
+set.seed(1)
+for(i in 1:length(fold)){
+    rf_res <- randomForest::randomForest(x = xdat[-fold[[i]],], y = as.factor(y[-fold[[i]]]))
+    preds4 <- predict(rf_res, xdat[fold[[i]],])
+    tab4 = table(preds4,y[fold[[i]]])
+    accRF[i] = tab4 %>% diag %>% sum %>% `/`(nrow(xdat[fold[[i]],]))
+    F1RF[i] = F1(tab4)}
+    
+    accRF_50times <- append(accRF_50times, mean(accRF))
+    F1RF_50times <- append(F1RF_50times, mean(F1RF))
+    
+}
+
+
+for (j in 1:30) {
+    print(j)
+    fold <- createFolds(y, k)
+##Logistic REGRESSION issues of multicolinearlity #######
+    #100 Parameter selected
+for(i in 1:length(fold)){
+    model2 <- glm(y[-fold[[i]]]~., data = xdat2[-fold[[i]],], family = binomial)
+    preds2 <- ifelse(predict(model2, xdat2[fold[[i]],]) > 0.5, 1, 0) 
+    tab2 = table(preds2,y[fold[[i]]])
+    accGLM[i] = tab2 %>% diag %>% sum %>% `/`(nrow(xdat[fold[[i]],]))
+    F1GLM[i] = F1(tab2)}
+    
+    accGLM_50times <- append(accGLM_50times, mean(accGLM))
+    F1GLM_50times <- append(F1GLM_50times, mean(F1GLM))
+    
+}
+
+
+
+model_val = data.frame("Accuracy"=c(accLASSOA_50times,accLASSOB_50times,accRF_50times, accGLM_50times), "F1 Score" = c(F1LASSOA_50times,F1LASSOB_50times,F1RF_50times,F1GLM_50times))
+model_val$Classifier =c()
+model_val$Classifier= c(rep("Optimal Lasso Regression",length(accLASSOA_50times)), rep("User-Defined Lasso Regression",length(accLASSOB_50times)), rep("Random Forest",length(accRF_50times)), rep("Logisitic Regression", length(accGLM_50times)))
+                      
+model_val = model_val[-sample(which(model_val$Classifier == "User-Defined Lasso Regression"),9),]
+
+saveRDS(model_val, "CV_EVAL_classifers.rds")
+
+model_val = readRDS("CV_EVAL_classifers.rds")
+model_val %>% group_by(Classifier) %>% summarise("mean Accuracy" =mean(Accuracy), "mean F1.Score" =mean(F1.Score)) %>% arrange(desc(`mean Accuracy`))
+
+```
+
+```{r}
+disre = data.frame("Overall Accuracy" = round(c(mean(accLASSOA_50times), mean(accLASSOB_50times),mean(accRF_50times), mean(accGLM_50times)), 4), "Overall F1 score" = round(c(mean(F1LASSOA_50times), mean(F1LASSOB_50times),mean(F1RF_50times), mean(F1GLM_50times)), 4))
+rownames(disre) = c("Optimal Lasso Regression", "User-Defined Lasso Regression", "Random Forest", "Logistic Regression")
+
+boxplot(accLASSOA_50times, accLASSOB_50times)
+boxplot(F1LASSOA_50times, F1LASSOB_50times)
+
+dat = data.frame(F1LASSOA_50times, accLASSOA_50times, F1LASSOB_50times,  accLASSOB_50times)
+dat$group <-paste("Repetition no:", rownames(dat))
+dat.m <- reshape2::melt(dat, id.vars = "group")
+dat.m$metric = rep("test", length(dat.m$value))
+dat.m$metric[which(dat.m$variable %like% "cv_F1%")] = "F1"
+dat.m$metric[which(dat.m$variable %like% "cv_acc%")] = "Accuracy"
+dat.m$variable = c(rep("LASSO optimum", 60), rep("LASSO modified", 60))
+                   
+#rep("Logistic Regression", 30), rep("Random Forest", 30)
+
+ggplot(dat.m, aes(variable, value, fill = metric)) + 
+  geom_boxplot(outlier.colour="black", outlier.shape=16,
+             outlier.size=2, notch=FALSE) + scale_fill_brewer(palette="RdBu") +
+  ggtitle("Plot Accuracy and F1 of SVM, Logisitic and LASSO regression over 3-fold CVs") +
+  xlab("Evaluative Metric") + ylab("Score") +ylim(c(0.5, 1))
+
+
+
+```
+
+```{r}
+#graphing based on gene
+library(wesanderson)
+chosen = sample(colnames(xdat_all),1)
+
+xtograph = xdat_all %>% select("reject_stat", chosen)
+xtograph$reject_stat = as.factor(ifelse(xtograph$reject_stat == 1, "Acute Renal Rejection", "Healthy Graft"))
+
+mu_h =mean(xtograph[2][xtograph[1] == 0])
+mu_r =mean(xtograph[2][xtograph[1] == 1])
+
+ggplot(xtograph, aes_string(x=chosen, fill="reject_stat")) +
+  geom_density(alpha =0.4)+labs(fill="Rejection Status", color = "", title = "Gene Expression categorised by rejection status")+
+  geom_vline(aes(xintercept=mu_r, color="ARR Median"),linetype="dashed")+
+  geom_vline(aes(xintercept=mu_h, color="Healthy Graft Median"),linetype="dashed")+ theme_minimal()
+
+
+ggplot(xtograph, aes(x=index, y=xtograph[3], shape=cyl, color=cyl)) +
+  geom_point()
+
+
+
+```
+
+
+
+
+
+```{r, penalised logistic regression}
+
+#for traditioinal logistic regression...
+#numerous assumptions: (1) Absence of multicolinearity, (2) independent variables linearly related to log-odds, (3) independent sampling (addressed in data collection)
+
+
+##Thus, apply penalised logistic regression using LASSO 
+
+#prep data(training/test) [66/33% split]
+datatrain = dfgse96[1:50,]
+datatest = dfgse96[51:75,]
+x <- model.matrix(reject_stat~., datatrain)[,-1]
+y <- datatrain$reject_stat
+
+library(glmnet)
+
+#use built in CV of Lasso regression to find lambda (coeffecient shrinkage), being the value that minimises cross-validation error. 
+reg = cv.glmnet(x, y, alpha = 1, family = "binomial")
+plot(reg)
+model =glmnet(x, y, family = "binomial", alpha = 0.5, lambda = reg$lambda.min)
+
+saveRDS(reg, "reg.rds")
+
+
+rownames(as.matrix(coef(model)))[as.matrix(coef(model))[,1] != "0"]
+
+
+x.test <- model.matrix(reject_stat ~., datatest)[,-1]
+probabilities <- model %>% predict(newx = x.test)
+predicted.classes <- ifelse(probabilities > 0.5, 1, 0)
+# Model accuracy
+observed.classes <- datatest$reject_stat
+mean(predicted.classes == observed.classes)
+
+```
+
+
+```{r}
+#boxplot visualisation
+
+accLASSOA_50times = accLASSOB_50times = accRF_50times = F1RF_50times =accGLM_50times = F1GLM_50times = F1LASSOA_50times = F1LASSOB_50times 
+
+model_val
+ab = reshape2::melt(model_val, id.vars = "Classifier")
+
+
+dat$group <-paste("Repetition no:", rownames(dat))
+    dat.m <- reshape2::melt(dat, id.vars = "group")
+    dat.m$metric = rep("test", length(dat.m$value))
+    dat.m$metric[which(dat.m$variable %like% "F1%")] = "F1"
+    dat.m$metric[which(dat.m$variable %like% "acc%")] = "Accuracy"
+    dat.m$variable = c(rep("LASSO optimum", 60), rep("LASSO modified", 60))
+    
+    
+```
+
